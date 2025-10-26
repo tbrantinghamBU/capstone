@@ -1,5 +1,6 @@
 import time
 import os
+import uuid
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
@@ -20,11 +21,10 @@ def run_experiment(model, X, y, preprocessor, mend_results, df_full=None,
     """
     Generic experiment runner for regression or classification models.
     Logs metrics, metadata, hyperparameters, and (if applicable) CV results.
-    sample_frac : float
-        Fraction of the dataset to use (between 0 and 1).
     """
 
     start_time = time.perf_counter()
+    run_id = str(uuid.uuid4())
 
     # Optionally shrink dataset
     if sample_frac < 1.0:
@@ -56,9 +56,11 @@ def run_experiment(model, X, y, preprocessor, mend_results, df_full=None,
 
     # Base results
     results = {
-        "model": type(model).__name__,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),   # NEW
+        "run_id": run_id,
+        "model_type": type(model).__name__,                # NEW explicit field
         "row_count": len(df_full) if df_full is not None else len(X),
-        "sampled_row_count": len(X),   # NEW: actual sample size used
+        "sampled_row_count": len(X),
         "feature_count": X.shape[1],
         "seed": random_state,
         "sample_frac": sample_frac
@@ -117,7 +119,7 @@ def run_experiment(model, X, y, preprocessor, mend_results, df_full=None,
     train_time = time.perf_counter() - start_time
     results["train_time_sec"] = train_time
 
-    # 🔑 Hyperparameters (flattened)
+    # Hyperparameters
     if hasattr(model, "best_estimator_"):
         params = model.best_estimator_.get_params()
         results["best_params"] = str(model.best_params_)
@@ -131,9 +133,37 @@ def run_experiment(model, X, y, preprocessor, mend_results, df_full=None,
     # If CV results exist, log them separately
     if hasattr(model, "cv_results_"):
         cv_df = pd.DataFrame(model.cv_results_)
+
+        # Add metadata
+        cv_df["model_type"] = type(model).__name__
+        cv_df["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        cv_df["run_id"] = run_id
+
+        # Ensure directory exists
         os.makedirs(os.path.dirname(cv_log_file), exist_ok=True)
-        write_header = not os.path.exists(cv_log_file)
-        cv_df.to_csv(cv_log_file, mode="a", header=write_header, index=False)
+
+        # If file exists, align columns with existing header
+        if os.path.exists(cv_log_file):
+            existing = pd.read_csv(cv_log_file, nrows=0)  # just header
+            existing_cols = list(existing.columns)
+
+            # Add any new columns at the end
+            new_cols = [c for c in cv_df.columns if c not in existing_cols]
+            ordered_cols = existing_cols + new_cols
+
+            # Reorder and fill missing
+            cv_df = cv_df.reindex(columns=ordered_cols)
+            header = False
+        else:
+            # First write: timestamp + model_type first, then rest alphabetically
+            base_cols = ["timestamp", "model_type"]
+            other_cols = sorted([c for c in cv_df.columns if c not in base_cols])
+            ordered_cols = base_cols + other_cols
+            cv_df = cv_df[ordered_cols]
+            header = True
+
+        # Append safely
+        cv_df.to_csv(cv_log_file, mode="a", header=header, index=False)
 
     # Append and log
     mend_results.append(results)
